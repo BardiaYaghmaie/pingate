@@ -1,82 +1,80 @@
+# Pingate
 
-## Our WebServer
-<b>It is the best.</b>
+Pingate is a compact Rust load balancer demo built with Pingora. It accepts
+HTTP traffic on `0.0.0.0:6198`, selects from two local upstreams with
+round-robin balancing, and runs TCP health checks in the background.
 
----
+## Demo Flow
 
-### Installation
-- <details>
-    <summary>1. Pull its image</summary>
-    <pre>docker pull ...</pre>
+Create and activate a Python environment:
 
-  </details>
+```shell
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-- <details>
-    <summary>2. Write your config file in a Toml format</summary>
-    <pre>Check out the ...</pre>
+Start the first upstream:
 
-  </details>
+```shell
+source .venv/bin/activate
+PINGATE_INSTANCE=upstream-1 panther run --port 8000 --reload
+```
 
-- <details open>
-    <summary>3. Run ...</summary>
-      <pre>I'll tell you later</pre>
+Start the second upstream in another terminal:
 
-  </details>
+```shell
+source .venv/bin/activate
+PINGATE_INSTANCE=upstream-2 panther run --port 8001 --reload
+```
 
----
+Run Pingate:
 
-### Be a Contributer
+```shell
+cargo run
+```
 
-- #### Install `rust`
-    Make sure `rustc` version `>1.85.0` is installed
-    ```shell
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-    ```
+Send repeated requests through the proxy:
 
-- #### Build and Run
+```shell
+curl 127.0.0.1:6198
+curl 127.0.0.1:6198
+```
 
-    ```shell
-    cargo run
-    ```
+Each response includes an `instance` value from the selected upstream, so the
+round-robin behavior is easy to see.
 
-- #### Run 2 servers
-    - Create virtualenv
-        ```shell
-        python3.12 -m venv .venv
-        ```
-    - Activate it
-        ```shell
-        ./venv/bin/activate
-        ```
-    - Create virtualenv
-        ```shell
-        pip install -r requirements.txt
-        ```
-    - Create virtualenv
-        ```shell
-        panther run --port 8000 --reload
-        ```
-    - Create virtualenv
-        ```shell
-        panther run --port 8001 --reload
-        ```
+## Configuration
 
-- #### Send a Request to your WebServer
+The demo configuration is stored in `config/config.toml`:
 
-    ```shell
-    curl 127.0.0.1:6188 -v
-    ```
+```toml
+[server]
+listen_addr = "0.0.0.0:6198"
 
-- #### Improve Documentation
-  
-    ```shell
-    pip install -r requirements.txt
-    ```
+[upstreams]
+addresses = ["127.0.0.1:8000", "127.0.0.1:8001"]
+health_check_frequency = 1
 
-    ```shell
-    cd docs/
-    ```
+[proxy]
+upstream_tls = false
+upstream_sni = ""
+```
 
-    ```shell
-    mkdocs serve
-    ```
+`upstream_tls = false` matches the local Panther servers. For HTTPS upstreams,
+set `upstream_tls = true` and provide the expected SNI hostname in
+`upstream_sni`.
+
+## Development Checks
+
+```shell
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+```
+
+Preview these docs locally:
+
+```shell
+mkdocs serve -f docs/mkdocs.yml
+```

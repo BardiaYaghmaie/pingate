@@ -1,9 +1,10 @@
 [server]
-listen_addr = "0.0.0.0:6188"
+listen_addr = "0.0.0.0:6198"
 
 [upstreams]
 addresses = ["127.0.0.1:8000", "127.0.0.1:8001"]
 health_check_frequency = 1  # seconds
 
 [proxy]
-upstream_identifier = "one.one.one.one"
+upstream_tls = false
+upstream_sni = ""

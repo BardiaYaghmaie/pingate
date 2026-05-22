@@ -1,10 +1,14 @@
 [package]
-name = "load_balancer"
+name = "pingate"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-async-trait="0.1"
+async-trait = "0.1"
+env_logger = { version = "=0.11.6", default-features = false }
+log = "0.4"
 pingora = { version = "0.3", features = [ "lb" ] }
 config = "0.13"
 serde = { version = "1.0", features = ["derive"] }
+rustfmt = "0.10.0"
+clippy = "0.0.302"
