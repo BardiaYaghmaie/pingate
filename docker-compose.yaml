@@ -1,35 +1,20 @@
+# Direct Docker socket mount. See the Readme's "Docker API security"
+# section for when to swap this for a restricted, non-root socket-proxy sidecar instead.
 services:
-  docker-proxy:
-    image: lscr.io/linuxserver/socket-proxy:latest
-    environment:
-      CONTAINERS: 1
-      EVENTS: 1
-      INFO: 1
-      NETWORKS: 1
-      PING: 1
-      VERSION: 1
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - control
-    read_only: true
-    tmpfs:
-      - /run
-
   pingate:
     build: .
     image: pingate:local
+    user: root
     environment:
       PINGATE_MODE: compose
-      PINGATE_DOCKER_HOST: http://docker-proxy:2375
+      PINGATE_DOCKER_HOST: unix:///var/run/docker.sock
       PINGATE_DOCKER_DEFAULT_NETWORK: pingate-public
       RUST_LOG: info
     ports:
       - "${PINGATE_PUBLISHED_PORT:-6198}:6198"
-    depends_on:
-      - docker-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - control
       - public
     read_only: true
     tmpfs:
@@ -64,7 +49,5 @@ services:
       - public
 
 networks:
-  control:
-    name: pingate-control
   public:
     name: pingate-public

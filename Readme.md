@@ -12,8 +12,12 @@ curl -H 'Host: api.localhost' http://127.0.0.1:6198
 curl -H 'Host: api.localhost' http://127.0.0.1:6198
 ```
 
-The example uses a restricted Docker socket proxy. Only TCP port `6198` is
-published. The health listener on TCP `6197` remains internal.
+The example mounts the Docker socket directly into Pingate (read-only) and
+runs the container as root, since reaching the socket already implies
+root-equivalent access to the host regardless of the container's UID. Only
+TCP port `6198` is published. The health listener on TCP `6197` remains
+internal. See "Docker API security" below for when to swap this for a
+restricted, non-root socket-proxy sidecar instead.
 
 ## Workload labels
 
@@ -89,19 +93,90 @@ Do not publish port `6197` to the public network.
 
 ## Docker API security
 
-Access to the Docker socket is highly privileged. The examples place a
-read-only API proxy between Pingate and the daemon. Pingate also supports a
-direct socket mount for controlled environments:
+Access to the Docker socket is highly privileged: a process that can reach it
+can do anything the Docker daemon can, including starting a privileged
+container that mounts the host filesystem. There is no partial-permission
+mode on the socket itself — you either can reach it or you can't.
+
+The examples in this repo mount the socket directly into Pingate, read-only
+on the bind mount, and run the container as root:
 
 ```yaml
+user: root
 environment:
   PINGATE_DOCKER_HOST: unix:///var/run/docker.sock
 volumes:
   - /var/run/docker.sock:/var/run/docker.sock:ro
 ```
 
-The image runs as UID/GID `65532`; direct socket deployments must grant that
-process access to the socket without making the container privileged.
+Running as root here is deliberate, not an oversight: the socket's owning
+group differs across hosts (a Linux `docker` group GID, `root` (gid 0) on
+Docker Desktop for Mac, something else again on Docker Desktop for
+Windows/WSL), so chasing it with `group_add` is fragile and breaks silently
+between environments. Mounting the socket at all already grants
+root-equivalent power over the host regardless of which UID the container
+runs as, so gating that behind a non-root UID buys no real security — it
+just adds a portability problem. `read_only: true`, `cap_drop: ALL`, and
+`no-new-privileges` still apply and are worth keeping.
+
+`:ro` on the mount only stops Pingate from replacing the socket file itself —
+it does not restrict which Docker API calls Pingate can make once connected.
+If Pingate is ever compromised (a bug, a malicious dependency, a container
+escape elsewhere on the host), the attacker gets full, unrestricted Docker
+Engine API access, which is roughly equivalent to root on the host.
+
+### When to use a socket-proxy sidecar instead
+
+For production deployments — especially anything internet-facing,
+multi-tenant, or where Pingate shares a host with workloads you don't fully
+trust — put a restricted, read-only API proxy between Pingate and the daemon
+instead of mounting the socket directly. A proxy such as
+[`lscr.io/linuxserver/socket-proxy`](https://github.com/linuxserver/docker-socket-proxy)
+(based on [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy))
+sits in its own container, is the only thing that touches the real socket,
+and forwards only an explicit allowlist of read-only endpoints (list
+containers/services, inspect networks, watch events) — nothing else. That
+puts a real process boundary between an attacker who compromises Pingate and
+the Docker daemon, which a same-process allowlist inside Pingate itself could
+never provide.
+
+```yaml
+services:
+  docker-proxy:
+    image: lscr.io/linuxserver/socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      EVENTS: 1
+      INFO: 1
+      NETWORKS: 1
+      PING: 1
+      VERSION: 1
+      # SERVICES: 1   # add these two in Swarm mode
+      # TASKS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - control
+    read_only: true
+    tmpfs:
+      - /run
+
+  pingate:
+    # ...
+    environment:
+      PINGATE_DOCKER_HOST: http://docker-proxy:2375
+    depends_on:
+      - docker-proxy
+    networks:
+      - control
+      - public
+```
+
+With this setup Pingate no longer needs the socket volume or `root` at all —
+it can run as its image's default non-root UID/GID `65532` and only needs
+network access to `docker-proxy` on the internal `control` network, which is
+never published externally. This is the setup to prefer once you're running
+in production.
 
 ## Development
 
