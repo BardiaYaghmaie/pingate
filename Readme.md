@@ -187,5 +187,7 @@ cargo test --locked
 docker build -t pingate:local .
 ```
 
-Release tags publish `linux/amd64` and `linux/arm64` images to
-`ghcr.io/bardiayaghmaie/pingate`.
+Pushing a semver git tag (`vX.Y.Z`) triggers the release workflow, which
+publishes `linux/amd64` and `linux/arm64` images to
+`ghcr.io/bardiayaghmaie/pingate` tagged `X.Y.Z`, `X.Y`, the commit SHA, and
+`latest`.
