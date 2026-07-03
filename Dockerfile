@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.12
 
-FROM rust:1.95.0-slim-bookworm AS builder
+FROM rust:1.96.1-slim-bookworm AS builder
 WORKDIR /src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential cmake libssl-dev perl pkg-config \
