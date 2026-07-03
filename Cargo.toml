@@ -2,13 +2,16 @@
 name = "pingate"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.95"
+description = "A Docker-native HTTP reverse proxy and load balancer built with Pingora"
+repository = "https://github.com/BardiaYaghmaie/pingate"
 
 [dependencies]
-async-trait = "0.1"
-env_logger = { version = "=0.11.6", default-features = false }
-log = "0.4"
-pingora = { version = "0.3", features = [ "lb" ] }
-config = "0.13"
-serde = { version = "1.0", features = ["derive"] }
-rustfmt = "0.10.0"
-clippy = "0.0.302"
+async-trait = "0.1.89"
+bollard = { version = "0.21.0", features = ["ssl"] }
+env_logger = { version = "0.11.11", default-features = false }
+futures-util = "0.3.32"
+http = "1.4.2"
+log = "0.4.33"
+pingora = { version = "0.8.1", features = ["lb", "openssl"] }
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "time"] }

@@ -1,218 +1,318 @@
-use serde::Deserialize;
-use std::{error::Error, fmt, net::SocketAddr};
+use std::{env, error::Error, fmt, net::SocketAddr, path::PathBuf};
 
-#[derive(Debug, Deserialize)]
+const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:6198";
+const DEFAULT_ADMIN_LISTEN_ADDR: &str = "0.0.0.0:6197";
+const DEFAULT_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Static,
+    Compose,
+    Swarm,
+}
+
+#[derive(Debug, Clone)]
 pub struct Settings {
+    pub mode: Mode,
     pub server: ServerConfig,
-    pub upstreams: UpstreamsConfig,
-    pub proxy: ProxyConfig,
+    pub static_upstreams: StaticConfig,
+    pub docker: DockerConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
-    pub listen_addr: String,
+    pub listen_addr: SocketAddr,
+    pub admin_listen_addr: SocketAddr,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UpstreamsConfig {
-    pub addresses: Vec<String>,
-    pub health_check_frequency: u64, // in seconds
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct ProxyConfig {
-    #[serde(default)]
+#[derive(Debug, Clone)]
+pub struct StaticConfig {
+    pub addresses: Vec<SocketAddr>,
+    pub health_check_interval_seconds: u64,
     pub upstream_tls: bool,
-    #[serde(default, alias = "upstream_identifier")]
     pub upstream_sni: String,
 }
 
-#[derive(Debug)]
-pub enum SettingsError {
-    Config(config::ConfigError),
-    Validation(ValidationError),
+#[derive(Debug, Clone)]
+pub struct DockerConfig {
+    pub host: String,
+    pub reconnect_interval_seconds: u64,
+    pub resync_interval_seconds: u64,
+    pub default_network: Option<String>,
+    pub tls_ca_path: Option<PathBuf>,
+    pub tls_cert_path: Option<PathBuf>,
+    pub tls_key_path: Option<PathBuf>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum ValidationError {
-    EmptyUpstreams,
-    InvalidListenAddr(String),
-    InvalidUpstreamAddr(String),
-    ZeroHealthCheckFrequency,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsError(String);
+
+impl SettingsError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
 }
 
 impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Config(err) => write!(f, "failed to read configuration: {err}"),
-            Self::Validation(err) => write!(f, "invalid configuration: {err}"),
-        }
+        f.write_str(&self.0)
     }
 }
 
-impl Error for SettingsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Config(err) => Some(err),
-            Self::Validation(err) => Some(err),
-        }
-    }
-}
-
-impl From<config::ConfigError> for SettingsError {
-    fn from(err: config::ConfigError) -> Self {
-        Self::Config(err)
-    }
-}
-
-impl fmt::Display for ValidationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyUpstreams => write!(f, "at least one upstream address is required"),
-            Self::InvalidListenAddr(addr) => {
-                write!(f, "server.listen_addr must be a socket address, got `{addr}`")
-            }
-            Self::InvalidUpstreamAddr(addr) => {
-                write!(f, "upstreams.addresses contains an invalid socket address: `{addr}`")
-            }
-            Self::ZeroHealthCheckFrequency => {
-                write!(f, "upstreams.health_check_frequency must be greater than zero")
-            }
-        }
-    }
-}
-
-impl Error for ValidationError {}
+impl Error for SettingsError {}
 
 impl Settings {
-    pub fn new() -> Result<Self, SettingsError> {
-        let cfg = config::Config::builder()
-            .add_source(config::File::with_name("config/config"))
-            .build()?;
-        let settings = cfg.try_deserialize::<Self>()?;
-        settings.validate().map_err(SettingsError::Validation)?;
-        Ok(settings)
+    pub fn from_env() -> Result<Self, SettingsError> {
+        Self::from_lookup(|key| env::var(key).ok())
     }
 
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        parse_socket_addr(&self.server.listen_addr)
-            .map_err(|_| ValidationError::InvalidListenAddr(self.server.listen_addr.clone()))?;
+    fn from_lookup<F>(lookup: F) -> Result<Self, SettingsError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let required = |key: &str| {
+            lookup(key)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| SettingsError::new(format!("{key} is required")))
+        };
+        let value_or = |key: &str, default: &str| lookup(key).unwrap_or_else(|| default.into());
 
-        if self.upstreams.addresses.is_empty() {
-            return Err(ValidationError::EmptyUpstreams);
+        let mode = match required("PINGATE_MODE")?.to_ascii_lowercase().as_str() {
+            "static" => Mode::Static,
+            "compose" => Mode::Compose,
+            "swarm" => Mode::Swarm,
+            value => {
+                return Err(SettingsError::new(format!(
+                    "PINGATE_MODE must be static, compose, or swarm; got `{value}`"
+                )))
+            }
+        };
+
+        let listen_addr = parse_socket_addr(
+            "PINGATE_LISTEN_ADDR",
+            &value_or("PINGATE_LISTEN_ADDR", DEFAULT_LISTEN_ADDR),
+        )?;
+        let admin_listen_addr = parse_socket_addr(
+            "PINGATE_ADMIN_LISTEN_ADDR",
+            &value_or("PINGATE_ADMIN_LISTEN_ADDR", DEFAULT_ADMIN_LISTEN_ADDR),
+        )?;
+        if listen_addr == admin_listen_addr {
+            return Err(SettingsError::new(
+                "PINGATE_LISTEN_ADDR and PINGATE_ADMIN_LISTEN_ADDR must differ",
+            ));
         }
 
-        for addr in &self.upstreams.addresses {
-            parse_socket_addr(addr)
-                .map_err(|_| ValidationError::InvalidUpstreamAddr(addr.clone()))?;
+        let addresses = match lookup("PINGATE_STATIC_UPSTREAMS") {
+            Some(value) => parse_upstreams(&value)?,
+            None if mode == Mode::Static => {
+                return Err(SettingsError::new(
+                    "PINGATE_STATIC_UPSTREAMS is required in static mode",
+                ))
+            }
+            None => Vec::new(),
+        };
+
+        let health_check_interval_seconds = parse_positive_u64(
+            "PINGATE_STATIC_HEALTH_CHECK_INTERVAL_SECONDS",
+            &value_or("PINGATE_STATIC_HEALTH_CHECK_INTERVAL_SECONDS", "5"),
+        )?;
+        let upstream_tls = parse_bool(
+            "PINGATE_STATIC_UPSTREAM_TLS",
+            &value_or("PINGATE_STATIC_UPSTREAM_TLS", "false"),
+        )?;
+        let upstream_sni = lookup("PINGATE_STATIC_UPSTREAM_SNI").unwrap_or_default();
+
+        let host = value_or("PINGATE_DOCKER_HOST", DEFAULT_DOCKER_HOST);
+        if !host.starts_with("unix://")
+            && !host.starts_with("http://")
+            && !host.starts_with("https://")
+        {
+            return Err(SettingsError::new(
+                "PINGATE_DOCKER_HOST must use unix://, http://, or https://",
+            ));
         }
 
-        if self.upstreams.health_check_frequency == 0 {
-            return Err(ValidationError::ZeroHealthCheckFrequency);
+        let reconnect_interval_seconds = parse_positive_u64(
+            "PINGATE_DOCKER_RECONNECT_INTERVAL_SECONDS",
+            &value_or("PINGATE_DOCKER_RECONNECT_INTERVAL_SECONDS", "2"),
+        )?;
+        let resync_interval_seconds = parse_positive_u64(
+            "PINGATE_DOCKER_RESYNC_INTERVAL_SECONDS",
+            &value_or("PINGATE_DOCKER_RESYNC_INTERVAL_SECONDS", "30"),
+        )?;
+        let default_network = non_empty(lookup("PINGATE_DOCKER_DEFAULT_NETWORK"));
+        let tls_ca_path = path(lookup("PINGATE_DOCKER_TLS_CA_PATH"));
+        let tls_cert_path = path(lookup("PINGATE_DOCKER_TLS_CERT_PATH"));
+        let tls_key_path = path(lookup("PINGATE_DOCKER_TLS_KEY_PATH"));
+        let custom_tls_count = [
+            tls_ca_path.is_some(),
+            tls_cert_path.is_some(),
+            tls_key_path.is_some(),
+        ]
+        .into_iter()
+        .filter(|configured| *configured)
+        .count();
+        if (1..3).contains(&custom_tls_count) {
+            return Err(SettingsError::new(
+                "PINGATE_DOCKER_TLS_CA_PATH, PINGATE_DOCKER_TLS_CERT_PATH, and PINGATE_DOCKER_TLS_KEY_PATH must be supplied together",
+            ));
         }
 
-        Ok(())
+        Ok(Self {
+            mode,
+            server: ServerConfig {
+                listen_addr,
+                admin_listen_addr,
+            },
+            static_upstreams: StaticConfig {
+                addresses,
+                health_check_interval_seconds,
+                upstream_tls,
+                upstream_sni,
+            },
+            docker: DockerConfig {
+                host,
+                reconnect_interval_seconds,
+                resync_interval_seconds,
+                default_network,
+                tls_ca_path,
+                tls_cert_path,
+                tls_key_path,
+            },
+        })
     }
 }
 
-fn parse_socket_addr(addr: &str) -> Result<SocketAddr, std::net::AddrParseError> {
-    addr.parse()
+fn parse_socket_addr(key: &str, value: &str) -> Result<SocketAddr, SettingsError> {
+    value
+        .parse()
+        .map_err(|_| SettingsError::new(format!("{key} must be a socket address, got `{value}`")))
+}
+
+fn parse_upstreams(value: &str) -> Result<Vec<SocketAddr>, SettingsError> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_socket_addr("PINGATE_STATIC_UPSTREAMS", value))
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.is_empty() {
+        return Err(SettingsError::new(
+            "PINGATE_STATIC_UPSTREAMS must contain at least one address",
+        ));
+    }
+    Ok(values)
+}
+
+fn parse_positive_u64(key: &str, value: &str) -> Result<u64, SettingsError> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| SettingsError::new(format!("{key} must be a positive integer")))
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool, SettingsError> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(SettingsError::new(format!(
+            "{key} must be true or false, got `{value}`"
+        ))),
+    }
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn path(value: Option<String>) -> Option<PathBuf> {
+    non_empty(value).map(PathBuf::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
-    fn valid_settings() -> Settings {
-        Settings {
-            server: ServerConfig {
-                listen_addr: "127.0.0.1:6198".to_string(),
-            },
-            upstreams: UpstreamsConfig {
-                addresses: vec![
-                    "127.0.0.1:8000".to_string(),
-                    "127.0.0.1:8001".to_string(),
-                ],
-                health_check_frequency: 1,
-            },
-            proxy: ProxyConfig {
-                upstream_tls: false,
-                upstream_sni: String::new(),
-            },
-        }
+    fn settings(values: &[(&str, &str)]) -> Result<Settings, SettingsError> {
+        let values = values
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<HashMap<_, _>>();
+        Settings::from_lookup(|key| values.get(key).cloned())
     }
 
     #[test]
-    fn validates_demo_config() {
-        assert_eq!(valid_settings().validate(), Ok(()));
-    }
-
-    #[test]
-    fn rejects_empty_upstream_list() {
-        let mut settings = valid_settings();
-        settings.upstreams.addresses.clear();
-
-        assert_eq!(settings.validate(), Err(ValidationError::EmptyUpstreams));
-    }
-
-    #[test]
-    fn rejects_invalid_listen_address() {
-        let mut settings = valid_settings();
-        settings.server.listen_addr = "localhost".to_string();
-
+    fn requires_mode() {
         assert_eq!(
-            settings.validate(),
-            Err(ValidationError::InvalidListenAddr("localhost".to_string()))
+            settings(&[]).unwrap_err().to_string(),
+            "PINGATE_MODE is required"
         );
     }
 
     #[test]
-    fn rejects_invalid_upstream_address() {
-        let mut settings = valid_settings();
-        settings.upstreams.addresses = vec!["not-an-address".to_string()];
+    fn loads_compose_defaults() {
+        let settings = settings(&[("PINGATE_MODE", "compose")]).unwrap();
+        assert_eq!(settings.mode, Mode::Compose);
+        assert_eq!(settings.server.listen_addr.port(), 6198);
+        assert_eq!(settings.server.admin_listen_addr.port(), 6197);
+        assert_eq!(settings.docker.host, DEFAULT_DOCKER_HOST);
+    }
 
+    #[test]
+    fn parses_static_upstream_list() {
+        let settings = settings(&[
+            ("PINGATE_MODE", "static"),
+            ("PINGATE_STATIC_UPSTREAMS", "127.0.0.1:8000, 127.0.0.1:8001"),
+        ])
+        .unwrap();
+        assert_eq!(settings.static_upstreams.addresses.len(), 2);
+    }
+
+    #[test]
+    fn rejects_static_mode_without_upstreams() {
         assert_eq!(
-            settings.validate(),
-            Err(ValidationError::InvalidUpstreamAddr(
-                "not-an-address".to_string()
-            ))
+            settings(&[("PINGATE_MODE", "static")])
+                .unwrap_err()
+                .to_string(),
+            "PINGATE_STATIC_UPSTREAMS is required in static mode"
         );
     }
 
     #[test]
-    fn rejects_zero_health_check_frequency() {
-        let mut settings = valid_settings();
-        settings.upstreams.health_check_frequency = 0;
-
-        assert_eq!(
-            settings.validate(),
-            Err(ValidationError::ZeroHealthCheckFrequency)
-        );
+    fn rejects_identical_listeners() {
+        let error = settings(&[
+            ("PINGATE_MODE", "compose"),
+            ("PINGATE_LISTEN_ADDR", "127.0.0.1:7000"),
+            ("PINGATE_ADMIN_LISTEN_ADDR", "127.0.0.1:7000"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("must differ"));
     }
 
     #[test]
-    fn accepts_legacy_upstream_identifier_alias() {
-        let cfg = config::Config::builder()
-            .add_source(config::File::from_str(
-                r#"
-                [server]
-                listen_addr = "127.0.0.1:6198"
+    fn rejects_incomplete_docker_client_certificate() {
+        let error = settings(&[
+            ("PINGATE_MODE", "swarm"),
+            ("PINGATE_DOCKER_TLS_CERT_PATH", "/cert.pem"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("must be supplied together"));
+    }
 
-                [upstreams]
-                addresses = ["127.0.0.1:8000"]
-                health_check_frequency = 1
-
-                [proxy]
-                upstream_identifier = "legacy.example"
-                "#,
-                config::FileFormat::Toml,
-            ))
-            .build()
-            .unwrap();
-
-        let settings = cfg.try_deserialize::<Settings>().unwrap();
-
-        assert_eq!(settings.proxy.upstream_sni, "legacy.example");
-        assert!(!settings.proxy.upstream_tls);
+    #[test]
+    fn rejects_unsupported_docker_host_scheme() {
+        let error = settings(&[
+            ("PINGATE_MODE", "compose"),
+            ("PINGATE_DOCKER_HOST", "ssh://manager"),
+        ])
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("must use unix://, http://, or https://"));
     }
 }

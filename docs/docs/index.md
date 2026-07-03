@@ -1,80 +1,37 @@
 # Pingate
 
-Pingate is a compact Rust load balancer demo built with Pingora. It accepts
-HTTP traffic on `0.0.0.0:6198`, selects from two local upstreams with
-round-robin balancing, and runs TCP health checks in the background.
+Pingate is an environment-configured reverse proxy for Docker Compose and
+Docker Swarm. It listens for public traffic on TCP `6198` and exposes internal
+liveness and readiness checks on TCP `6197`.
 
-## Demo Flow
-
-Create and activate a Python environment:
+## Compose
 
 ```shell
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+docker compose up --build --detach --wait
+curl -H 'Host: api.localhost' http://127.0.0.1:6198
 ```
 
-Start the first upstream:
+Routed containers require `pingate.enable`, `pingate.host`, `pingate.port`, and
+normally `pingate.network` labels. Pingate refreshes routes after Docker events
+and periodically, without requiring a restart.
+
+## Swarm
 
 ```shell
-source .venv/bin/activate
-PINGATE_INSTANCE=upstream-1 panther run --port 8000 --reload
+docker network create --driver overlay --attachable pingate-public
+docker stack deploy --compose-file docker-stack.yaml pingate
 ```
 
-Start the second upstream in another terminal:
+For Swarm, put routing labels under `deploy.labels`. Pingate runs with manager
+API access and resolves running replicas over the shared overlay network.
 
-```shell
-source .venv/bin/activate
-PINGATE_INSTANCE=upstream-2 panther run --port 8001 --reload
-```
+## Health
 
-Run Pingate:
+- `/healthz` reports process liveness.
+- `/readyz` becomes successful after the initial discovery reconciliation.
+- `pingate healthcheck` is available for container health checks.
 
-```shell
-cargo run
-```
+The admin port is intentionally not published by the supplied deployment
+examples.
 
-Send repeated requests through the proxy:
-
-```shell
-curl 127.0.0.1:6198
-curl 127.0.0.1:6198
-```
-
-Each response includes an `instance` value from the selected upstream, so the
-round-robin behavior is easy to see.
-
-## Configuration
-
-The demo configuration is stored in `config/config.toml`:
-
-```toml
-[server]
-listen_addr = "0.0.0.0:6198"
-
-[upstreams]
-addresses = ["127.0.0.1:8000", "127.0.0.1:8001"]
-health_check_frequency = 1
-
-[proxy]
-upstream_tls = false
-upstream_sni = ""
-```
-
-`upstream_tls = false` matches the local Panther servers. For HTTPS upstreams,
-set `upstream_tls = true` and provide the expected SNI hostname in
-`upstream_sni`.
-
-## Development Checks
-
-```shell
-cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
-```
-
-Preview these docs locally:
-
-```shell
-mkdocs serve -f docs/mkdocs.yml
-```
+See the repository README for the complete environment and label reference.

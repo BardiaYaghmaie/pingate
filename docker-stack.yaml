@@ -1,0 +1,62 @@
+services:
+  docker-proxy:
+    image: lscr.io/linuxserver/socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      EVENTS: 1
+      INFO: 1
+      NETWORKS: 1
+      PING: 1
+      SERVICES: 1
+      TASKS: 1
+      VERSION: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - control
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+
+  pingate:
+    image: ${PINGATE_IMAGE:-ghcr.io/bardiayaghmaie/pingate:latest}
+    environment:
+      PINGATE_MODE: swarm
+      PINGATE_DOCKER_HOST: http://docker-proxy:2375
+      PINGATE_DOCKER_DEFAULT_NETWORK: pingate-public
+      RUST_LOG: info
+    ports:
+      - target: 6198
+        published: 6198
+        protocol: tcp
+        mode: ingress
+    networks:
+      - control
+      - public
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+
+  api:
+    image: nginx:alpine
+    networks:
+      - public
+    deploy:
+      replicas: 2
+      labels:
+        pingate.enable: "true"
+        pingate.host: api.localhost
+        pingate.port: "80"
+        pingate.network: pingate-public
+
+networks:
+  control:
+    driver: overlay
+    attachable: true
+  public:
+    external: true
+    name: pingate-public

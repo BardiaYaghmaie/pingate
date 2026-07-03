@@ -1,0 +1,70 @@
+services:
+  docker-proxy:
+    image: lscr.io/linuxserver/socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      EVENTS: 1
+      INFO: 1
+      NETWORKS: 1
+      PING: 1
+      VERSION: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - control
+    read_only: true
+    tmpfs:
+      - /run
+
+  pingate:
+    build: .
+    image: pingate:local
+    environment:
+      PINGATE_MODE: compose
+      PINGATE_DOCKER_HOST: http://docker-proxy:2375
+      PINGATE_DOCKER_DEFAULT_NETWORK: pingate-public
+      RUST_LOG: info
+    ports:
+      - "${PINGATE_PUBLISHED_PORT:-6198}:6198"
+    depends_on:
+      - docker-proxy
+    networks:
+      - control
+      - public
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  api1:
+    image: nginx:alpine
+    volumes:
+      - ./smoke/api1:/usr/share/nginx/html:ro
+    labels:
+      pingate.enable: "true"
+      pingate.host: api.localhost
+      pingate.port: "80"
+      pingate.network: pingate-public
+    networks:
+      - public
+
+  api2:
+    image: nginx:alpine
+    volumes:
+      - ./smoke/api2:/usr/share/nginx/html:ro
+    labels:
+      pingate.enable: "true"
+      pingate.host: api.localhost
+      pingate.port: "80"
+      pingate.network: pingate-public
+    networks:
+      - public
+
+networks:
+  control:
+    name: pingate-control
+  public:
+    name: pingate-public

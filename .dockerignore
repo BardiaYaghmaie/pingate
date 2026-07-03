@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.venv
+__pycache__
+target
+logs
+docs
+main.py
+requirements.txt
+docker-compose.yaml
+docker-stack.yaml
+Readme.md
