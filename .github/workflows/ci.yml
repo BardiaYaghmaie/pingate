@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up --build --detach --wait
+      - name: Verify round robin
+        run: |
+          responses="$(for i in 1 2 3 4; do curl --fail --silent -H 'Host: api.localhost' http://127.0.0.1:6198; done)"
+          grep -q api1 <<<"$responses"
+          grep -q api2 <<<"$responses"
+      - if: always()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down --volumes
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: pingate:test
+      - run: docker run --rm --entrypoint /usr/bin/id pingate:test
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: pingate:test
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  swarm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag pingate:test .
+      - run: docker swarm init
+      - run: docker network create --driver overlay --attachable pingate-public
+      - name: Deploy stack
+        env:
+          PINGATE_IMAGE: pingate:test
+        run: docker stack deploy --resolve-image never --compose-file docker-stack.yaml pingate
+      - name: Wait for routing
+        run: |
+          for attempt in {1..60}; do
+            if curl --fail --silent -H 'Host: api.localhost' http://127.0.0.1:6198 >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Verify scaling and rolling update
+        run: |
+          docker service scale pingate_api=3
+          docker service update --force pingate_api
+          for attempt in {1..60}; do
+            running="$(docker service ls --filter name=pingate_api --format '{{.Replicas}}')"
+            if [ "$running" = "3/3" ] && curl --fail --silent -H 'Host: api.localhost' http://127.0.0.1:6198 >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - if: always()
+        run: docker service logs pingate_pingate
+      - if: always()
+        run: docker stack rm pingate
