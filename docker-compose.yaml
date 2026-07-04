@@ -8,7 +8,7 @@ services:
       PINGATE_MODE: compose
       PINGATE_DOCKER_HOST: unix:///var/run/docker.sock
     ports:
-      - "80:6198"
+      - "6198:6198"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     read_only: true
